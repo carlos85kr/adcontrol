@@ -1,0 +1,474 @@
+// server_socket_win.cpp : Definiert den Einstiegspunkt für die Anwendung.
+//
+ 
+#include "stdafx.h"
+ 
+// #####  Zeiger für AGILENT 89600 COM-Schnittstelle
+// ####################################################################
+ 
+//#import "C:\Program Files (x86)\Agilent\89600 VSA\Vector\VsaVector.exe"   
+#include "VsaVector.tlh"
+ 
+using namespace AgtVsaVector;
+ 
+_ApplicationPtr oApp;
+_MeasurementPtr oMeas;
+_DisplayPtr     oDisp;
+ 
+time_t zeit;
+ 
+// #####  Flag bCreated (prüft ob VSA-Applikation gestartet wurde)
+bool bCreated = false; // Default: Instanz VSAScalar vorhanden
+ 
+ 
+// ###############################################################################
+// -------------  SOCKET-SERVER --------------------------------------------------
+// ###############################################################################
+ 
+ 
+//  Generate error message and exit program
+void error (char *fmt, ...)
+{   
+    va_list args;
+    va_start (args, fmt);
+    vfprintf (stderr, fmt, args);
+    fprintf (stderr, "\n");
+    va_end (args);
+    CoUninitialize();
+    exit (-1);
+}
+ 
+ 
+ 
+void Init_VSA_Vector(double range)
+{
+    // #######################################################################
+    // ########## VSA initialisieren #########################################
+    // #######################################################################
+ 
+    // Initialize COM
+ 
+    HRESULT hr;
+     
+    CoInitialize (NULL);
+     
+    // Get an existing 89600 VSA instance.
+    hr = oApp.GetActiveObject(__uuidof(Application));
+ 
+    if (hr != S_OK) 
+    {
+        // None there - create one.
+        // #####  Flag bCreated (prüft ob VSA-Applikation gestartet wurde)
+        bCreated = true;
+ 
+        hr = oApp.CreateInstance(__uuidof(Application));
+        if (hr != S_OK)
+            //AfxMessageBox ("CreateInstance error.");
+            printf("CreateInstance error.");
+    }
+     
+    oApp->Title = "Aufzeichnung von Zeitsignalen";           // label the analyzer display
+    oApp->Visible = VARIANT_TRUE;                            // Make application invisible.
+     
+    // Get interfaces to major items
+    oMeas = oApp->Measurement;
+    oDisp = oApp->Display;
+     
+    oMeas->Reset();
+ 
+    // Live-Daten verarbeiten
+    oMeas->Inputs->DataFrom = vsaInpsDataFromHardware;    
+    //oMeas->Inputs->DataFrom = vsaInpsDataFromRecording; 
+ 
+    // Set input range
+    //oMeas->Inputs->InpChannels->Item[1]->Range = 0.05;    // 1 Volt peak
+    oMeas->Inputs->InpChannels->Item[1]->Range = range;     // NEU: Empfindlichkeit gem. Parameter "range" setzen !! 31.03.15
+ 
+    // Single-Display Spektrum
+    oDisp->Traces->Layout = vsaTrcLytSingle;
+     
+    oDisp->Traces->Item[1]->DataName = "Main Time1";   // Zeitsignal
+    oDisp->Traces->ActiveIndex = 1;
+ 
+    oDisp->Traces->Item[1]->Format = vsaTrcFmtLinMag;  // Lineare Ausgabe des Zeitsignals
+    
+    // Set for single-shot measurement
+    oMeas->Continuous = VARIANT_TRUE; 
+ 
+}
+ 
+ 
+ 
+void Exit_VSA_Vector(void)
+{
+    if (bCreated == false) return;
+     
+    // Clean Up
+    oMeas = NULL;
+    oDisp = NULL;
+ 
+    oApp->Quit();    // Exit 89600 VSA if I started it
+    oApp = NULL;
+     
+    CoUninitialize();
+}
+ 
+ 
+ 
+void ParameterSetzen_Vector(long cent, long span)
+{
+    oMeas->Reset();
+ 
+    oMeas->Frequency->Center = (double) cent;     //  Mittenfrequenz in Hz
+    oMeas->Frequency->Span =   (double) span;     //  Span in Hz
+}
+ 
+ 
+double CenterFreqAbfragen_Vector(void)
+{
+    double center = oMeas->Frequency->Center/1.0e3;
+    return center;
+}
+ 
+ 
+ 
+double SpanAbfragen_Vector(void)
+{   
+    double span   = oMeas->Frequency->Span/1.0e3;
+    return span;
+}
+ 
+double RangeAbfragen_Vector(void)
+{
+    double range = oMeas->Inputs->InpChannels->Item[1]->Range;
+    return range;
+}
+ 
+ 
+double ReclenAbfragen_Vector(void)
+{
+    double time = oMeas->Inputs->Recording->GetRecLen();
+    return time;
+}
+ 
+ 
+void MesswerteAufzeichnen(SOCKET client_socket, double reclen, char *filename, char *format, int timeout)
+{
+    char text[200], timestamp[20];
+ 
+    // Aufzeichnung parametrisieren
+    oMeas->Inputs->DataFrom = vsaInpsDataFromHardware;
+    oMeas->Inputs->Recording->Trigger->Slope = vsaTrigSlopePos; // Triggerung mit ansteigender Flanke
+ 
+    // Systemzeit auslesen
+    time(&zeit);
+ 
+    // Parameter: Aufzeichnungslaenge parametrisieren
+    oMeas->Inputs->Recording->SetRecLen(reclen,vsaRecLenSecond);
+ 
+    // echte Aufzeichnungslaenge
+    sprintf(text,"[%s]\tAufzeichnungszeit: %.3f s",_strtime(timestamp),ReclenAbfragen_Vector());
+    // Meldung an Client senden
+    SendeDaten(client_socket,text,timeout);
+    // Kontrollausgabe
+    printf("%s\n",text);
+ 
+    oMeas->Reset();
+    oMeas->Start();
+ 
+    // Systemzeit auslesen
+    time(&zeit);
+ 
+    // Aufzeichnung starten
+    sprintf(text,"[%s]\tMessdaten aufzeichnen!",_strtime(timestamp));
+    // Meldung an Client senden
+    SendeDaten(client_socket,text,timeout);
+    // Kontrollausgabe
+    printf("%s\n",text);
+ 
+    oMeas->Record();
+ 
+    // Warte bis Aufzeichnung beendet
+    while(oMeas->Status->Value & vsaStatusBitRecording);
+ 
+    // Systemzeit auslesen
+    time(&zeit);
+ 
+    sprintf(text,"[%s]\tAufzeichnung beendet",_strtime(timestamp));
+    // Meldung an Client senden
+    SendeDaten(client_socket,text,timeout);
+    // Kontrollausgabe
+    printf("%s\n",text);
+     
+    // Systemzeit auslesen
+    time(&zeit);
+ 
+    sprintf(text,"[%s]\tSpeicherung in temporaere Datei: %s",_strtime(timestamp),filename);
+    // Meldung an Client senden
+    SendeDaten(client_socket,text,timeout);
+    // Kontrollausgabe
+    printf("%s\n",text);
+ 
+    //----- Aufzeichung mit Header in Text-File schreiben ---------------
+    oMeas->Inputs->Recording->SaveFile(filename,format,true);
+ 
+    // Systemzeit auslesen
+    time(&zeit);
+ 
+    sprintf(text,"[%s]\tSpeicherung in Datei beendet",_strtime(timestamp));
+    // Meldung an Client senden
+    SendeDaten(client_socket,text,timeout);
+    // Kontrollausgabe
+    printf("%s\n",text);
+}
+ 
+ 
+ 
+int LeseDaten(SOCKET client_socket, char *echo_buffer, int timeout)
+{
+    int recv_size, count = 0;
+ 
+    while(count < timeout * 20)
+    {
+        recv_size = recv(client_socket, echo_buffer, RCVBUFSIZE, 0);
+        if (recv_size > 0)
+            break;
+ 
+        Sleep(50);
+        count++;
+    }
+ 
+    if(recv_size < 0)
+        error_exit("Fehler bei recv()");
+ 
+    echo_buffer[recv_size] = '\0';
+ 
+    // Sende Quittung
+    char quittung[] = "Quittung!";
+ 
+    int iResult = send(client_socket,quittung,(int)strlen(quittung),0);
+    if(iResult == SOCKET_ERROR)
+    {
+        printf("send acknowledge failed with error: %d\n",WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return -1;
+    }
+ 
+    return recv_size;
+}
+ 
+ 
+int SendeDaten(SOCKET client_socket, char *daten, int timeout)
+{
+    int iResult = send( client_socket, daten, (int)strlen(daten), 0 );
+    if (iResult == SOCKET_ERROR) 
+    {
+        printf("send failed with error: %d\n", WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+     
+    // Lese Quittung
+    int recv_size, count = 0;
+    char ack[20];
+ 
+    while(count < timeout * 20)
+    {
+        recv_size = recv(client_socket, ack, 20, 0);
+        if (recv_size > 0)
+            break;
+ 
+        Sleep(50);
+        count++;
+    }
+ 
+    if(recv_size < 0)
+        error_exit("Fehler bei recv() acknowledge");
+ 
+    return EXIT_SUCCESS;
+}
+ 
+ 
+static void error_exit(char *error_message)
+{
+    fprintf(stderr,"%s: %d\n",error_message, WSAGetLastError());    
+    getchar();
+    exit(EXIT_FAILURE);
+}
+ 
+// ###############################################################################
+// -------------  Ende SOCKET-SERVER ---------------------------------------------
+// ###############################################################################
+ 
+ 
+ 
+int main(int argc, char* argv[])
+{
+    //struct hostent *host_info;
+    struct sockaddr_in server, client;
+    SOCKET sock, fd;
+     
+    char freq[20], span[20], dauer[20], range[20], file[80], text[200], pfad[200];
+    char date[10],timestamp[10];
+ 
+    double reclen;
+    int timeout = 10; // Timeout 10 Sekunden
+ 
+    // Initialisiere TCP für Windows ("Winsock")
+    WORD wVersionRequested;
+    WSADATA wsaData;
+    wVersionRequested = MAKEWORD (2,2);
+     
+    if(WSAStartup(wVersionRequested,&wsaData) != 0)
+        error_exit("Fehler beim Initialisieren von 'WINSOCK'");
+ 
+    // Erzeuge das Socket
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+ 
+    if (sock < 0)
+        error_exit("Fehler beim Anlegen eines Sockets.");
+ 
+    // Erzeuge die Socketaddresse des Servers
+    memset(&server, 0, sizeof (server));
+ 
+    // IPv4-Verbindung
+    server.sin_family = AF_INET;
+     
+    // INADDR_ANY: jede IP-Adresse annehmen
+    server.sin_addr.s_addr = htonl(INADDR_ANY);
+ 
+    // Portnummer
+    server.sin_port = htons(PORT);
+ 
+    // Erzeuge die Bindung an die Serveradresse
+    // genauer: an einem bestimmten Port
+    if(bind(sock,(struct sockaddr*) &server, sizeof(server)) < 0)
+        error_exit("Kann das Socket nicht \"binden\"");
+ 
+    // Teile dem Socket mit, dass Verbindungswünsche 
+    // von Client entgegegengenommen werden
+    if(listen(sock,5) == -1)
+        error_exit("Fehler bei \"listen\"");
+ 
+    printf("Server bereit - wartet auf Anfragen ...\n");
+ 
+    //host_info = gethostbyname(argv[1]);
+    //printf("--------> HOSTNAME: %s\n",host_info->h_name);
+ 
+    while(1)
+    {
+            /*
+            Bearbeite die Verbindungswünsche von Clients
+            in einer Endlosschleife.
+            Der Aufruf von accept() blockiert so lange,
+            bis ein Client Verbindung aufnimmt.
+            */
+ 
+            int len = sizeof(client);
+ 
+            fd = accept(sock, (struct sockaddr*) &client, &len);
+            if(fd < 0)
+                error_exit("Fehler bei \"accept\"");
+ 
+            printf("Bearbeite den Client mit der Addresse: %s\n",inet_ntoa(client.sin_addr));
+ 
+            // Parameter vom Client lesen
+            LeseDaten(fd,freq,timeout);  //  L-Band-Sat-Frequenz (ZF)
+            LeseDaten(fd,span,timeout);  //  Bandbreite
+            LeseDaten(fd,range,timeout); //  NEU: Empfindlichkeit 31.03.2015
+            LeseDaten(fd,dauer,timeout); //  Aufzeichnungsdauer (in sec)
+            LeseDaten(fd,file,timeout);  //  Aufzeichnungsdatei (Pfad/Dateiname) 
+             
+            // Pfad fuer temporaeres Recordfile auf Server setzen
+            strcpy(pfad,"C:\\Programme\\AD\\");
+            // Dateinamen des Recordfiles anhaengen
+            strcat(pfad,file);
+ 
+            // Systemzeit auslesen
+            time(&zeit); 
+ 
+            // Kontrollausgabe der Parameter
+            printf("Parameter:\n");
+            printf("----------\n");
+            printf("Datum: %s\nUhrzeit: %s\nL-Bandfrequenz: %s MHz\nBandbreite: %s MHz\nRange: %s V\nDauer: %s s\nDatei: %s\n\n",_strdate(date),_strtime(timestamp),freq,span,range,dauer,file);
+         
+            // Systemzeit auslesen
+            time(&zeit); 
+ 
+            //VSA initialisieren
+            Init_VSA_Vector(atof(range));
+            sprintf(text,"[%s]\tVSA initialisiert",_strtime(timestamp));
+            // Meldung an Client senden
+            SendeDaten(fd,text,timeout);
+            //Kontrollausgabe
+            printf("%s\n",text);
+             
+            int iFreq = (int) (atof(freq)*1e6);
+            int iSpan = (int) (atof(span)*1e6);
+ 
+            ParameterSetzen_Vector(iFreq,iSpan);
+ 
+            // Systemzeit auslesen
+            time(&zeit); 
+ 
+            sprintf(text,"[%s]\tMittenfrequenz und Span eingestellt",_strtime(timestamp));
+            // Meldung an Client senden
+            SendeDaten(fd,text,timeout);
+            //Kontrollausgabe
+            printf("%s\n",text);
+             
+            // Systemzeit auslesen
+            time(&zeit); 
+ 
+            sprintf(text,"[%s]\tFrequenz: %.3f MHz\t%Bandbreite: %.3f MHz",_strtime(timestamp),CenterFreqAbfragen_Vector()/1e3,SpanAbfragen_Vector()/1e3);
+            // Meldung an Client senden
+            SendeDaten(fd,text,timeout);
+            //Kontrollausgabe
+            printf("%s\n",text);
+ 
+            // Systemzeit auslesen
+            time(&zeit); 
+ 
+            sprintf(text,"[%s]\tRange eingestellt",_strtime(timestamp));
+            // Meldung an Client senden
+            SendeDaten(fd,text,timeout);
+            //Kontrollausgabe
+            printf("%s\n",text);
+             
+            // Systemzeit auslesen
+            time(&zeit); 
+ 
+            sprintf(text,"[%s]\tRange: %.4f V",_strtime(timestamp),RangeAbfragen_Vector());
+            // Meldung an Client senden
+            SendeDaten(fd,text,timeout);
+            //Kontrollausgabe
+            printf("%s\n",text);
+ 
+ 
+            // Messdaten aufzeichnen
+ 
+            // Aufzeichnungslaenge ermitteln
+            reclen = atof(dauer);
+ 
+            // Messwerte aufzeichnen im binaeren Format (n5510a)
+            MesswerteAufzeichnen(fd,reclen,pfad,"n5510a",timeout);
+ 
+            Exit_VSA_Vector();
+ 
+            // Systemzeit auslesen
+            time(&zeit); 
+ 
+            sprintf(text,"[%s]\tBeende VSA",_strtime(timestamp));
+            // Meldung an Client senden
+            SendeDaten(fd,text,timeout);
+            //Kontrollausgabe
+            printf("%s\n",text);
+ 
+            // Schließe die Verbindung
+            closesocket(fd);
+    }
+ 
+    return EXIT_SUCCESS;
+}
