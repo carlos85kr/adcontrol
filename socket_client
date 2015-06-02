@@ -1,0 +1,300 @@
+// Client_Socket.cpp
+//
+ 
+#include "stdafx.h"
+ 
+void error_exit(char *error_message)
+{
+    fprintf(stderr,"%s: %d\n",error_message, WSAGetLastError());    
+    exit(EXIT_FAILURE);
+}
+ 
+ 
+int LeseDaten(SOCKET server_socket, char *daten, int timeout, char *server)
+{
+    int recv_size, count = 0;
+     
+    while(count < timeout*20)
+    {
+        recv_size = recv(server_socket, daten, RCVBUFSIZE, 0);
+        if (recv_size > 0)
+            break;
+        Sleep(50);
+        count++;
+    }
+ 
+    if (recv_size < 0)
+        error_exit("Fehler bei recv()");
+ 
+    daten[recv_size] = '\0';
+ 
+    // Sende Quittung
+    char quittung[] = "Quittung!";
+ 
+    int iResult = send( server_socket, quittung, (int)strlen(quittung), 0 );
+    if (iResult < 0) {
+        printf("send failed with error: %d\n", WSAGetLastError());
+        closesocket(server_socket);
+        WSACleanup();
+        return -1;
+    }
+ 
+    printf("[%s] %s\n",server,daten);
+ 
+    return recv_size;
+}
+ 
+ 
+ 
+int SendeDaten(SOCKET server_socket, char *daten, int timeout)
+{
+ 
+    int iResult = send( server_socket, daten, (int)strlen(daten), 0 );
+    if (iResult < 0) {
+        printf("send failed with error: %d\n", WSAGetLastError());
+        closesocket(server_socket);
+        WSACleanup();
+        return -1;
+    }
+ 
+    // Lese Quittung
+    int recv_size, count = 0;
+    char ack[20];
+ 
+    while(count < timeout*20)
+    {
+        recv_size = recv(server_socket, ack, RCVBUFSIZE, 0);
+        if (recv_size > 0)
+            break;
+        Sleep(50);
+        count++;
+    }
+ 
+    if (recv_size < 0)
+        error_exit("Fehler bei recv() Acknowledge");
+ 
+    return EXIT_SUCCESS;
+}
+ 
+void getFileNameBin(char* path, char* filename)
+{
+    int index = 0;
+    char extension[] = ".bin";
+ 
+    for(int i = 0; i < (int)strlen(path); i++)
+    {
+        if (path[i] == '\\')
+            index = i;
+    }
+ 
+    // Pfad vorhanden
+    if (index != 0)
+        // Pfad entfernen und speichern des reinen Dateinamens in 'filename' speichern
+        strcpy(filename,path+index+1);
+    // kein Pfad vorhanden
+    else
+        // Dateiname in 'filename' speichern
+        strcpy(filename,path);
+ 
+    // ggf. Extension ".bin" anhängen, falls anderes/kein Extension vorhanden
+ 
+    char* pDest = strstr(filename,extension);
+ 
+    if(pDest == NULL)
+        // Extension '.bin' nicht vorhanden --> anhaengen
+        strcat(filename,extension);
+    else
+    {
+        // Extension vorhanden
+        int pos = (int) (pDest-filename); // Position im String ermitteln
+ 
+        // pruefen ob Ext. am Ende, falls nein Extension anhängen
+        if (pos != strlen(filename) - 4)
+            strcat(filename,extension);
+    }   
+}
+ 
+ 
+ 
+int main(int argc, char* argv[])
+{
+    WSADATA wsaData;
+    SOCKET ConnectSocket = INVALID_SOCKET;
+    struct addrinfo *result = NULL,
+                    *ptr = NULL,
+                    hints;
+    char freq[20], span[20], range[20], file[80], filename[80], dauer[20], text[200];
+    char timestamp[20];
+ 
+    int iResult, timeout = 10; /* Timout: 10 Sekunden*/
+    int recvbuflen = DEFAULT_BUFLEN;
+ 
+    time_t zeit;
+     
+   
+    // Validate the parameters
+    if (argc != 12) {
+        printf("usage: %s <Server-name/Server-IP>\n", argv[0]);
+        printf("       -f <L-Bandfrequenz in MHz>\n");
+        printf("       -b <Bandbreite in MHz>\n");
+        printf("       -r <Range in Vss>\n");                            // NEU: 01.04.2015
+        printf("       -t <Aufzeichnungsdauer in sec\n");
+        printf("       -d <Pfad/Dateiname>\n");
+        return 1;
+    }
+ 
+ 
+    // Parameter ermitteln
+ 
+    for(int i = 1; i <= 5; i++)
+    {
+     
+        // ------ L-Bandbandfrequenz -----------
+        if(!strcmp(argv[2*i],"-f"))
+            strcpy(freq,argv[2*i+1]);
+ 
+        // ------- Bandbreite ------------------
+        if(!strcmp(argv[2*i],"-b"))
+            strcpy(span,argv[2*i+1]);
+ 
+        // ------- Range ------------------              // NEU: 01.04.2015
+        if(!strcmp(argv[2*i],"-r"))
+            strcpy(range,argv[2*i+1]);
+ 
+        // --------- Aufzeichungsdauer ---------
+        if(!strcmp(argv[2*i],"-t"))
+            strcpy(dauer,argv[2*i+1]);
+ 
+        // --------- Datei mit Pfad -------------
+        if(!strcmp(argv[2*i],"-d"))
+            strcpy(file,argv[2*i+1]);
+    }
+ 
+    time(&zeit);
+ 
+    // Kontrollausgabe der Parameter
+    printf("Parameter:\n");
+    printf("----------\n");
+    printf("Uhrzeit: %s\nServer: %s\nL-Bandfrequenz: %s MHz\nBandbreite: %s MHz\nRange: %s V\nDauer: %s s\n",_strtime(timestamp),argv[1],freq,span,range,dauer);
+ 
+    getFileNameBin(file,filename);
+ 
+    printf("Datei: %s\n\n",filename);
+ 
+    // Initialize Winsock
+    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
+    if (iResult != 0) 
+    {
+        printf("WSAStartup failed with error: %d\n", iResult);
+        return 1;
+    }
+ 
+    ZeroMemory( &hints, sizeof(hints) );
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+ 
+    // Resolve the server address and port
+    iResult = getaddrinfo(argv[1], DEFAULT_PORT, &hints, &result);
+    //iResult = getaddrinfo(ip, DEFAULT_PORT, &hints, &result);
+    if ( iResult != 0 ) {
+        printf("getaddrinfo failed with error: %d\n", iResult);
+        WSACleanup();
+        return 1;
+    }
+ 
+    // Attempt to connect to an address until one succeeds
+    for(ptr=result; ptr != NULL ;ptr=ptr->ai_next) {
+ 
+        // Create a SOCKET for connecting to server
+        ConnectSocket = socket(ptr->ai_family, ptr->ai_socktype, 
+            ptr->ai_protocol);
+        if (ConnectSocket == INVALID_SOCKET) {
+            printf("socket failed with error: %ld\n", WSAGetLastError());
+            WSACleanup();
+            return 1;
+        }
+ 
+        // Connect to server.
+        iResult = connect( ConnectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
+        if (iResult == SOCKET_ERROR) {
+            closesocket(ConnectSocket);
+            ConnectSocket = INVALID_SOCKET;
+            continue;
+        }
+        break;
+    }
+ 
+    freeaddrinfo(result);
+ 
+    if (ConnectSocket == INVALID_SOCKET) {
+        printf("Unable to connect to server!\n");
+        WSACleanup();
+        return 1;
+    }
+ 
+    // --------------------------------
+    // Parameter an Server senden
+    // --------------------------------
+ 
+    // Sende L-Bandfrequenz
+    SendeDaten(ConnectSocket,freq,timeout);
+ 
+    // Sende Bandbreite
+    SendeDaten(ConnectSocket,span,timeout);
+ 
+    // Sende Range
+    SendeDaten(ConnectSocket,range,timeout);
+ 
+    // Sende Aufzeichnungsdauer
+    SendeDaten(ConnectSocket,dauer,timeout);
+ 
+    // Sende Dateiname mit Pfad
+    SendeDaten(ConnectSocket,filename,timeout);
+ 
+ 
+    // --------------------------------
+    // Meldungen vom Server empfangen
+    // --------------------------------
+ 
+    // VSA-Vector initialisiert
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // VSA_Vector Mittenfrequenz und Span eingestellt
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // Frequenz: ...\nBandbreite: ...
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // VSA-Vector Range eingestellt
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // Range: ....
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // wirkliche Aufzeichnungslaenge
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // Messdaten aufzeichnen
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // Aufzeichnung beendet
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // Schreibe in Datei
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // In Datei geschrieben 
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+    // VSA_Vector schließen
+    LeseDaten(ConnectSocket,text,timeout,argv[1]);
+ 
+    // File vom Server mit SAMBA (smbclient) auf Client kopieren (LINUX!!) -- mit der Funktion system()
+    // system("smbclient ...");
+ 
+    // shutdown the connection since no more data will be sent
+    iResult = shutdown(ConnectSocket, SD_SEND);
+    if (iResult == SOCKET_ERROR) {
+        printf("shutdown failed with error: %d\n", WSAGetLastError());
+        closesocket(ConnectSocket);
+        WSACleanup();
+        return 1;
+    }
+ 
+    // cleanup
+    closesocket(ConnectSocket);
+    WSACleanup();
+ 
+    return 0;
+}
